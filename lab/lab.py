@@ -72,11 +72,16 @@ def assess():
                 c.execute("SELECT received_lsn::text,latest_end_lsn::text FROM pg_stat_subscription WHERE subname='ledger_sub'")
                 subscription=c.fetchone()
             result["target_subscription"]=subscription
+            with dst.cursor() as c:
+                c.execute("SELECT subenabled FROM pg_subscription WHERE subname='ledger_sub'")
+                row=c.fetchone()
+                result["subscription_enabled"]=bool(row[0]) if row else False
             if a["schema_hash"]!=b["schema_hash"]: result["reasons"].append("schema mismatch")
             if a["digest"]!=b["digest"]: result["reasons"].append("source/target row mismatch")
             if a["broken_events"] or b["broken_events"]: result["reasons"].append("unbalanced or incomplete synthetic event")
             if not a["sequence_safe"] or not b["sequence_safe"]: result["reasons"].append("unsafe identity sequence")
             if not fenced: result["reasons"].append("source write fence not enabled")
+            if not result["subscription_enabled"]: result["reasons"].append("logical subscription disabled or missing")
             if not subscription or not subscription[0]: result["reasons"].append("subscription not reporting received LSN")
             if result["reasons"]: result["decision"]="NO-GO"
             else: result["reasons"].append("missing independently verified replay watermark, dependency health, and rollback evidence")
