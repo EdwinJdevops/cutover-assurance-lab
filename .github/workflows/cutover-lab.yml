@@ -1,0 +1,40 @@
+name: Cutover lab - disposable PostgreSQL
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'lab/**'
+      - '.github/workflows/cutover-lab.yml'
+permissions:
+  contents: read
+concurrency:
+  group: cutover-lab-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  experiment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: lab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: lab/requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - name: Run isolated baseline and failure scenarios
+        run: python ci_experiment.py
+      - name: Upload synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cutover-evidence-${{ github.run_id }}
+          path: lab/evidence/
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Cleanup disposable databases
+        if: always()
+        run: docker compose down -v --remove-orphans
