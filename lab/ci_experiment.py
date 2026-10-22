@@ -40,6 +40,14 @@ def fresh():
     # PostgreSQL does not replicate sequence state. Establish a safe baseline explicitly.
     run(sys.executable,"lab.py","sync-sequence")
 
+def stall_replication():
+    # Stop subscriber apply without destroying the replication slot.
+    with __import__("psycopg").connect("postgresql://postgres:labonly@localhost:55433/ledger",autocommit=True) as target:
+        target.execute("ALTER SUBSCRIPTION ledger_sub DISABLE")
+    # Source writes after the subscriber stops must not be mistaken for replicated state.
+    with __import__("psycopg").connect("postgresql://postgres:labonly@localhost:55432/ledger",autocommit=True) as source:
+        event=__import__("uuid").uuid4()\n        source.execute("INSERT INTO ledger_entries(event_id,account_id,amount) VALUES (%s,%s,%s),(%s,%s,%s)", (event,"payer",-100,event,"payee",100))
+
 def record(name,data):
     (OUT/f"{name}.json").write_text(json.dumps(data,indent=2,sort_keys=True)+"\n")
 
@@ -51,11 +59,17 @@ def main():
         with __import__("psycopg").connect("postgresql://postgres:labonly@localhost:55432/ledger",autocommit=True) as source:
             source.execute("UPDATE lab_control SET writes_fenced=FALSE WHERE singleton")
         record("unfenced",wait_for("NO-GO","source write fence not enabled"))
+        fresh()
+        # Baseline source is fenced: explicitly release it to simulate new writes.
+        with __import__("psycopg").connect("postgresql://postgres:labonly@localhost:55432/ledger",autocommit=True) as source:
+            source.execute("UPDATE lab_control SET writes_fenced=FALSE WHERE singleton")
+        stall_replication()
+        record("replication-stall",wait_for("NO-GO","source/target row mismatch"))
         for kind,reason in [("schema","schema mismatch"),("corruption","source/target row mismatch"),("sequence","unsafe identity sequence")]:
             fresh()
             run(sys.executable,"lab.py","inject",kind)
             record(kind,wait_for("NO-GO",reason))
-        print("PASS: baseline UNKNOWN; unfenced/schema/corruption/sequence NO-GO")
+        print("PASS: baseline UNKNOWN; unfenced/stall/schema/corruption/sequence NO-GO")
     finally:
         run("docker","compose","down","-v","--remove-orphans",check=False)
 
