@@ -66,6 +66,7 @@ def main():
             source.execute("UPDATE lab_control SET writes_fenced=FALSE WHERE singleton")
         stall_replication()
         record("replication-stall",wait_for("NO-GO","source/target row mismatch"))
+        record("subscription-disabled",wait_for("NO-GO","logical subscription disabled or missing"))
         for kind,reason in [("schema","schema mismatch"),("corruption","source/target row mismatch"),("sequence","unsafe identity sequence")]:
             fresh()
             run(sys.executable,"lab.py","inject",kind)
