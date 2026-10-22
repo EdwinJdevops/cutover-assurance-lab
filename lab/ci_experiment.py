@@ -46,7 +46,8 @@ def stall_replication():
         target.execute("ALTER SUBSCRIPTION ledger_sub DISABLE")
     # Source writes after the subscriber stops must not be mistaken for replicated state.
     with __import__("psycopg").connect("postgresql://postgres:labonly@localhost:55432/ledger",autocommit=True) as source:
-        event=__import__("uuid").uuid4()\n        source.execute("INSERT INTO ledger_entries(event_id,account_id,amount) VALUES (%s,%s,%s),(%s,%s,%s)", (event,"payer",-100,event,"payee",100))
+        event=__import__("uuid").uuid4()
+        source.execute("INSERT INTO ledger_entries(event_id,account_id,amount) VALUES (%s,%s,%s),(%s,%s,%s)", (event,"payer",-100,event,"payee",100))
 
 def record(name,data):
     (OUT/f"{name}.json").write_text(json.dumps(data,indent=2,sort_keys=True)+"\n")
