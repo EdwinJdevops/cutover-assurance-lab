@@ -47,11 +47,15 @@ def main():
     try:
         fresh()
         record("baseline",wait_for("UNKNOWN","missing independently verified"))
+        # Deliberately remove the source write fence; assessment must fail closed.
+        with __import__("psycopg").connect("postgresql://postgres:labonly@localhost:55432/ledger",autocommit=True) as source:
+            source.execute("UPDATE lab_control SET writes_fenced=FALSE WHERE singleton")
+        record("unfenced",wait_for("NO-GO","source write fence not enabled"))
         for kind,reason in [("schema","schema mismatch"),("corruption","source/target row mismatch"),("sequence","unsafe identity sequence")]:
             fresh()
             run(sys.executable,"lab.py","inject",kind)
             record(kind,wait_for("NO-GO",reason))
-        print("PASS: baseline UNKNOWN; schema/corruption/sequence NO-GO")
+        print("PASS: baseline UNKNOWN; unfenced/schema/corruption/sequence NO-GO")
     finally:
         run("docker","compose","down","-v","--remove-orphans",check=False)
 
