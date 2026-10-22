@@ -1,0 +1,26 @@
+services:
+  source:
+    image: postgres:16.10
+    environment:
+      POSTGRES_PASSWORD: labonly
+      POSTGRES_DB: ledger
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
+    ports: ["127.0.0.1:55432:5432"]
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ledger"]
+      interval: 2s
+      retries: 30
+  target:
+    image: postgres:16.10
+    environment:
+      POSTGRES_PASSWORD: labonly
+      POSTGRES_DB: ledger
+    ports: ["127.0.0.1:55433:5432"]
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ledger"]
+      interval: 2s
+      retries: 30
