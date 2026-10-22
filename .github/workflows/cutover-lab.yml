@@ -25,6 +25,8 @@ jobs:
           cache: pip
           cache-dependency-path: lab/requirements.txt
       - run: python -m pip install -r requirements.txt
+      - name: Validate Python syntax before provisioning databases
+        run: python -m compileall -q lab.py ci_experiment.py
       - name: Run isolated baseline and failure scenarios
         run: python ci_experiment.py
       - name: Upload synthetic evidence
