@@ -54,11 +54,13 @@ replication-slot failover, network partitions, exactly-once external actions or 
 ## CI audit, 24 October 2026
 
 The initial 17-run history contained five failures, three cancellations and nine
-successes. Historical failures included missing lab files/cache inputs, command-line
-usage errors and Python syntax errors. These were superseded by successful later runs,
+successes. Historical failures included missing lab files/cache inputs, early execution
+failures (exit code 2) and Python syntax errors. These were superseded by successful later runs,
 including run 40000061740 at ce1aa05. Cancelled run 40000047831 had no jobs.
 The current validation batch reruns the affected setup, syntax, coordinator and
 PostgreSQL scenario steps on the updated revision; obsolete failing commits are not
 rerun, to avoid spending Actions minutes on already corrected source.
 See Actions logs and uploaded JSON artifacts for actual results; a commit alone is
 not verification. AWS and production are outside this repository's execution scope.
+
+Verified results: [24 October 2026 evidence review](research/verification-2026-10-24.md).
