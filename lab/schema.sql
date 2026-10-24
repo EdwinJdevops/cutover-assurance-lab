@@ -20,3 +20,14 @@ BEGIN
 END $$;
 CREATE TRIGGER ledger_write_fence BEFORE INSERT OR UPDATE OR DELETE ON ledger_entries
  FOR EACH ROW EXECUTE FUNCTION block_fenced_writes();
+
+-- This row is replicated in the same subscription as the ledger.
+CREATE TABLE cutover_barrier (
+ singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+ token UUID NOT NULL,
+ source_txid TEXT NOT NULL,
+ ledger_digest TEXT NOT NULL,
+ ledger_rows BIGINT NOT NULL,
+ schema_hash TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);

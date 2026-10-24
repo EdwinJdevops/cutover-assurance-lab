@@ -52,8 +52,63 @@ def stall_replication():
 def record(name,data):
     (OUT/f"{name}.json").write_text(json.dumps(data,indent=2,sort_keys=True)+"\n")
 
+def barrier_scenarios():
+    import psycopg
+    from lab import SOURCE, TARGET
+    fresh()
+    record("barrier-applied",wait_for("UNKNOWN","missing independently verified"))
+    # Equal ledger contents alone must never mask a marker that did not apply.
+    with psycopg.connect(TARGET,autocommit=True) as dst:
+        dst.execute("ALTER SUBSCRIPTION ledger_sub DISABLE")
+    run(sys.executable,"lab.py","fence")
+    record("barrier-not-applied",wait_for("NO-GO","transaction-linked barrier mismatch"))
+    with psycopg.connect(TARGET,autocommit=True) as dst:
+        dst.execute("ALTER SUBSCRIPTION ledger_sub ENABLE")
+    record("barrier-resumed",wait_for("UNKNOWN","missing independently verified"))
+    # An uncommitted marker is invisible, and rollback must preserve the old marker.
+    with psycopg.connect(SOURCE,autocommit=True) as src:
+        before=src.execute("SELECT token FROM cutover_barrier").fetchone()
+        src.execute("BEGIN")
+        src.execute("UPDATE cutover_barrier SET token=gen_random_uuid()")
+        with psycopg.connect(SOURCE,autocommit=True) as observer:
+            assert observer.execute("SELECT token FROM cutover_barrier").fetchone()==before
+        src.execute("ROLLBACK")
+        assert src.execute("SELECT token FROM cutover_barrier").fetchone()==before
+    record("barrier-rollback",wait_for("UNKNOWN","missing independently verified"))
+    # Force actual PostgreSQL process death, retaining container data directories.
+    run("docker","compose","kill","-s","SIGKILL","source","target")
+    unavailable=assess()
+    assert unavailable["decision"] != "GO"
+    assert any("evidence unavailable" in r for r in unavailable["reasons"])
+    record("postgres-unavailable",unavailable)
+    run("docker","compose","up","-d","--wait")
+    record("postgres-crash-restart",wait_for("UNKNOWN","missing independently verified"))
+    for kind,sql,reason in [
+        ("missing","DELETE FROM cutover_barrier","missing"),
+        ("conflict","UPDATE cutover_barrier SET source_txid='wrong'","mismatch")]:
+        with psycopg.connect(TARGET,autocommit=True) as dst:
+            dst.execute(sql)
+        record("barrier-"+kind,wait_for("NO-GO","transaction-linked barrier "+reason))
+        fresh()
+        wait_for("UNKNOWN","missing independently verified")
+    with psycopg.connect(SOURCE,autocommit=True) as src:
+        src.execute("UPDATE cutover_barrier SET created_at=clock_timestamp()-interval '10 minutes'")
+    record("barrier-expired",wait_for("NO-GO","expired or future dated"))
+    run(sys.executable,"lab.py","fence")
+    wait_for("UNKNOWN","missing independently verified")
+    # Both ledgers can agree yet disagree with their older barrier.
+    with psycopg.connect(SOURCE,autocommit=True) as src:
+        src.execute("UPDATE lab_control SET writes_fenced=FALSE")
+    run(sys.executable,"lab.py","seed","1")
+    with psycopg.connect(SOURCE,autocommit=True) as src:
+        src.execute("UPDATE lab_control SET writes_fenced=TRUE")
+    run(sys.executable,"lab.py","sync-sequence")
+    record("barrier-ledger-diverged",wait_for("NO-GO","barrier ledger mismatch"))
+
+
 def main():
     try:
+        barrier_scenarios()
         fresh()
         record("baseline",wait_for("UNKNOWN","missing independently verified"))
         # Deliberately remove the source write fence; assessment must fail closed.
@@ -71,7 +126,7 @@ def main():
             fresh()
             run(sys.executable,"lab.py","inject",kind)
             record(kind,wait_for("NO-GO",reason))
-        print("PASS: baseline UNKNOWN; unfenced/stall/schema/corruption/sequence NO-GO")
+        print("PASS: transaction barrier, PostgreSQL crash/restart, baseline UNKNOWN and failure scenarios NO-GO")
     finally:
         run("docker","compose","down","-v","--remove-orphans",check=False)
 

@@ -3,15 +3,15 @@ import argparse, hashlib, json, os, sys, uuid
 from datetime import datetime, timezone
 import psycopg
 
-SOURCE = os.getenv("SOURCE_DSN", "postgresql://postgres:labonly@localhost:55432/ledger")
-TARGET = os.getenv("TARGET_DSN", "postgresql://postgres:labonly@localhost:55433/ledger")
+SOURCE = "postgresql://postgres:labonly@localhost:55432/ledger"
+TARGET = "postgresql://postgres:labonly@localhost:55433/ledger"
 
 def connect(dsn):
     return psycopg.connect(dsn, connect_timeout=5, autocommit=True)
 
 def setup():
     with connect(SOURCE) as src, connect(TARGET) as dst:
-        src.execute("CREATE PUBLICATION ledger_pub FOR TABLE ledger_entries")
+        src.execute("CREATE PUBLICATION ledger_pub FOR TABLE ledger_entries, cutover_barrier")
         dst.execute("CREATE SUBSCRIPTION ledger_sub CONNECTION 'host=source port=5432 dbname=ledger user=postgres password=labonly' PUBLICATION ledger_pub WITH (copy_data=true)")
     print("Logical replication configured")
 
@@ -25,8 +25,48 @@ def seed(n):
 
 def fence():
     with connect(SOURCE) as src:
-        src.execute("UPDATE lab_control SET writes_fenced=TRUE WHERE singleton")
-    print("Lab-level source trigger enabled; not application-wide fencing")
+        with src.transaction():
+            src.execute("SET LOCAL lock_timeout='5s'")
+            # Drain existing DML before taking the fingerprint and committing the fence.
+            src.execute("LOCK TABLE ledger_entries IN SHARE ROW EXCLUSIVE MODE")
+            src.execute("UPDATE lab_control SET writes_fenced=TRUE WHERE singleton")
+            a = fingerprint(src)
+            src.execute("""INSERT INTO cutover_barrier
+                (singleton,token,source_txid,ledger_digest,ledger_rows,schema_hash)
+                VALUES(TRUE,%s,pg_current_xact_id()::text,%s,%s,%s)
+                ON CONFLICT(singleton) DO UPDATE SET token=excluded.token,
+                source_txid=excluded.source_txid,ledger_digest=excluded.ledger_digest,
+                ledger_rows=excluded.ledger_rows,schema_hash=excluded.schema_hash,
+                created_at=clock_timestamp()""",
+                (uuid.uuid4(),a["digest"],a["rows"],a["schema_hash"]))
+    print("Committed synthetic fence and transaction-linked barrier; not application-wide fencing")
+
+
+def barrier(conn):
+    row = conn.execute("""SELECT token::text,source_txid,ledger_digest,ledger_rows,
+        schema_hash,created_at FROM cutover_barrier WHERE singleton""").fetchone()
+    if row is None:
+        return None
+    return dict(zip(("token","source_txid","digest","rows","schema_hash","created_at"),row))
+
+
+def check_barrier(src, dst, a, b):
+    source, target = barrier(src), barrier(dst)
+    reasons = []
+    if source is None or target is None:
+        reasons.append("transaction-linked barrier missing")
+    elif source != target:
+        reasons.append("transaction-linked barrier mismatch")
+    else:
+        age = (datetime.now(timezone.utc)-source["created_at"]).total_seconds()
+        if not 0 <= age <= 300:
+            reasons.append("transaction-linked barrier expired or future dated")
+        for data in (a,b):
+            if any(source[k] != data[k] for k in ("digest","rows","schema_hash")):
+                reasons.append("transaction-linked barrier ledger mismatch")
+                break
+    return {"source":source,"target":target,"matched":not reasons}, reasons
+
 
 def sync_sequence():
     # Logical replication does not advance subscriber identity sequences.
@@ -41,7 +81,7 @@ def sync_sequence():
 
 def fingerprint(conn):
     with conn.cursor() as c:
-        c.execute("SELECT event_id::text,account_id,amount FROM ledger_entries ORDER BY event_id,account_id")
+        c.execute("SELECT id,event_id::text,account_id,amount,created_at::text FROM ledger_entries ORDER BY id")
         rows = c.fetchall()
         digest = hashlib.sha256(json.dumps(rows,separators=(",",":")).encode()).hexdigest()
         c.execute("SELECT event_id::text,count(*),sum(amount) FROM ledger_entries GROUP BY event_id HAVING count(*)<>2 OR sum(amount)<>0")
@@ -61,7 +101,12 @@ def assess():
     result={"time_utc":datetime.now(timezone.utc).isoformat(),"decision":"UNKNOWN","reasons":[],"scope":"Synthetic ledger; never production approval"}
     try:
         with connect(SOURCE) as src, connect(TARGET) as dst:
+            # Each database is internally consistent; this is not a cross-database snapshot.
+            src.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            dst.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             a,b=fingerprint(src),fingerprint(dst)
+            result["barrier"], barrier_reasons = check_barrier(src,dst,a,b)
+            result["reasons"].extend(barrier_reasons)
             result["source"],result["target"]=a,b
             with src.cursor() as c:
                 c.execute("SELECT writes_fenced FROM lab_control WHERE singleton")
@@ -86,10 +131,10 @@ def assess():
             if not a["sequence_safe"] or not b["sequence_safe"]: result["reasons"].append("unsafe identity sequence")
             if not fenced: result["reasons"].append("source write fence not enabled")
             if not result["subscription_enabled"]: result["reasons"].append("logical subscription disabled or missing")
-            if table_count < 1 or ready_count != table_count: result["reasons"].append("replicated tables not all ready")
+            if table_count != 2 or ready_count != table_count: result["reasons"].append("replicated tables not all ready")
             if not subscription or not subscription[0]: result["reasons"].append("subscription apply worker missing or not reporting received LSN")
             if result["reasons"]: result["decision"]="NO-GO"
-            else: result["reasons"].append("missing independently verified replay watermark, dependency health, and rollback evidence")
+            else: result["reasons"].append("missing independently verified application fencing, dependency health, and rollback evidence")
     except Exception as e:
         result["reasons"].append(f"evidence unavailable: {type(e).__name__}: {e}")
     result["record_sha256"]=hashlib.sha256(json.dumps(result,sort_keys=True,default=str).encode()).hexdigest()

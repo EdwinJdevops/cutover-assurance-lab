@@ -51,7 +51,7 @@ def initialize(db, key):
         db.execute("ROLLBACK")
         raise
 
-def transition(db,key,expected_revision,next_state,evidence=None):
+def transition(db,key,expected_revision,next_state,evidence=None, *, _checkpoint=lambda stage: None):
     if next_state not in STATES:
         raise ValueError("unknown state")
     db.execute("BEGIN IMMEDIATE")
@@ -74,8 +74,11 @@ def transition(db,key,expected_revision,next_state,evidence=None):
         rev+=1
         db.execute("UPDATE cutovers SET state=?,revision=?,evidence_json=?,updated_at=? WHERE cutover_id=?",
                    (next_state,rev,json.dumps(evidence,sort_keys=True) if evidence else None,now(),key))
+        _checkpoint("after_update")
         db.execute("INSERT INTO events VALUES(?,?,?,?)",(key,rev,state,next_state))
+        _checkpoint("after_event")
         db.execute("COMMIT")
+        _checkpoint("after_commit")
         return next_state,rev
     except Exception:
         db.execute("ROLLBACK")
